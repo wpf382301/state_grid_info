@@ -25,6 +25,7 @@ from .const import (
     CONF_YEAR_LADDER_START,
     CONF_PRICE_PEAK, CONF_PRICE_FLAT, CONF_PRICE_VALLEY, CONF_PRICE_TIP,
     CONF_MONTH_PRICES, CONF_AVERAGE_PRICE, CONF_IS_PREPAID,
+    CONF_UPDATE_INTERVAL_MINUTES, DEFAULT_UPDATE_INTERVAL_MINUTES,
 )
 
 _LOGGER = logging.getLogger(__name__)
@@ -63,6 +64,9 @@ class StateGridInfoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         
         if user_input is not None:
             self._data[CONF_DATA_SOURCE] = user_input[CONF_DATA_SOURCE]
+            self._data[CONF_UPDATE_INTERVAL_MINUTES] = user_input[
+                CONF_UPDATE_INTERVAL_MINUTES
+            ]
             
             if user_input[CONF_DATA_SOURCE] == DATA_SOURCE_HASSBOX:
                 return await self.async_step_hassbox_consumer()
@@ -75,6 +79,10 @@ class StateGridInfoConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             step_id="data_source",
             data_schema=vol.Schema({
                 vol.Required(CONF_DATA_SOURCE, default=DATA_SOURCE_HASSBOX): vol.In(data_source_options),
+                vol.Required(
+                    CONF_UPDATE_INTERVAL_MINUTES,
+                    default=DEFAULT_UPDATE_INTERVAL_MINUTES,
+                ): vol.All(vol.Coerce(int), vol.Range(min=10, max=1440)),
             }),
             errors=errors,
         )
@@ -412,6 +420,9 @@ class StateGridInfoOptionsFlowHandler(config_entries.OptionsFlow):
         
         if user_input is not None:
             self._data[CONF_DATA_SOURCE] = user_input[CONF_DATA_SOURCE]
+            self._data[CONF_UPDATE_INTERVAL_MINUTES] = user_input[
+                CONF_UPDATE_INTERVAL_MINUTES
+            ]
             
             if user_input[CONF_DATA_SOURCE] == DATA_SOURCE_HASSBOX:
                 return await self.async_step_hassbox_consumer()
@@ -424,6 +435,13 @@ class StateGridInfoOptionsFlowHandler(config_entries.OptionsFlow):
             step_id="data_source",
             data_schema=vol.Schema({
                 vol.Required(CONF_DATA_SOURCE, default=self._data.get(CONF_DATA_SOURCE, DATA_SOURCE_HASSBOX)): vol.In(data_source_options),
+                vol.Required(
+                    CONF_UPDATE_INTERVAL_MINUTES,
+                    default=self._data.get(
+                        CONF_UPDATE_INTERVAL_MINUTES,
+                        DEFAULT_UPDATE_INTERVAL_MINUTES,
+                    ),
+                ): vol.All(vol.Coerce(int), vol.Range(min=10, max=1440)),
             }),
             errors=errors,
         )

@@ -5,7 +5,8 @@
         "title": "Select Data Source",
         "description": "Please select the source of State Grid data",
         "data": {
-          "data_source": "Data Source"
+          "data_source": "Data Source",
+          "update_interval_minutes": "Refresh interval (minutes, 10–1440)"
         }
       },
       "hassbox_consumer": {

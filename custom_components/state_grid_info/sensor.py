@@ -2,6 +2,7 @@
 import logging
 import json
 import asyncio
+from copy import deepcopy
 from datetime import datetime, timedelta
 import paho.mqtt.client as mqtt
 
@@ -9,7 +10,11 @@ from homeassistant.components.sensor import SensorEntity
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
 from homeassistant.helpers.entity_platform import AddEntitiesCallback
-from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from homeassistant.helpers.update_coordinator import (
+    CoordinatorEntity,
+    DataUpdateCoordinator,
+    UpdateFailed,
+)
 from homeassistant.util import Throttle
 from homeassistant.const import CONF_NAME
 
@@ -27,6 +32,7 @@ from .const import (
     CONF_YEAR_LADDER_START,
     CONF_PRICE_PEAK, CONF_PRICE_FLAT, CONF_PRICE_VALLEY, CONF_PRICE_TIP,
     CONF_MONTH_PRICES, CONF_AVERAGE_PRICE, CONF_IS_PREPAID,
+    CONF_UPDATE_INTERVAL_MINUTES, DEFAULT_UPDATE_INTERVAL_MINUTES,
 )
 from .storage import StateGridStorage
 
@@ -36,10 +42,10 @@ async def async_setup_entry(
     hass: HomeAssistant, entry: ConfigEntry, async_add_entities: AddEntitiesCallback
 ) -> None:
     """Set up the State Grid Info sensor."""
-    config = entry.data
+    config = {**entry.data, **entry.options}
     
     # 创建数据协调器
-    coordinator = StateGridInfoDataCoordinator(hass, config)
+    coordinator = StateGridInfoDataCoordinator(hass, config, entry)
     await coordinator.async_load_storage()
     await coordinator.async_config_entry_first_refresh()
     
@@ -49,20 +55,34 @@ async def async_setup_entry(
     # 存储实体以便在卸载时访问
     if DOMAIN in hass.data and entry.entry_id in hass.data[DOMAIN]:
         hass.data[DOMAIN][entry.entry_id]["entities"] = [sensor]
+        hass.data[DOMAIN][entry.entry_id]["coordinator"] = coordinator
     
-    async_add_entities([sensor], True)
+    async_add_entities([sensor])
 
 
 class StateGridInfoDataCoordinator(DataUpdateCoordinator):
     """Class to manage fetching State Grid Info data."""
 
-    def __init__(self, hass: HomeAssistant, config: dict):
+    def __init__(
+        self, hass: HomeAssistant, config: dict, config_entry: ConfigEntry
+    ):
         """Initialize the data coordinator."""
+        update_minutes = config.get(
+            CONF_UPDATE_INTERVAL_MINUTES, DEFAULT_UPDATE_INTERVAL_MINUTES
+        )
+        try:
+            update_minutes = int(update_minutes)
+        except (TypeError, ValueError):
+            update_minutes = DEFAULT_UPDATE_INTERVAL_MINUTES
+        update_minutes = max(10, min(update_minutes, 1440))
+
         super().__init__(
             hass,
             _LOGGER,
+            config_entry=config_entry,
             name=DOMAIN,
-            update_interval=timedelta(minutes=10),  # 每10分钟自动更新
+            update_interval=timedelta(minutes=update_minutes),
+            always_update=False,
         )
         self.config = config
         self.mqtt_client = None
@@ -79,7 +99,7 @@ class StateGridInfoDataCoordinator(DataUpdateCoordinator):
         """Load persistent storage data asynchronously."""
         await self._storage.async_load()
         if self._storage.data.get("dayList"):
-            self.data = dict(self._storage.data)
+            self.data = deepcopy(self._storage.data)
 
     def _setup_data_source(self):
         """Set up the data source based on configuration."""
@@ -179,15 +199,18 @@ class StateGridInfoDataCoordinator(DataUpdateCoordinator):
             
             # 先更新到持久化存储，再读取到HA
             if processed_data:
-                merged_data = self._storage.update(processed_data)
-                self.data = merged_data
+                new_data = self._storage.update(processed_data)
             else:
-                self.data = processed_data
-            
-            self.last_update_time = receive_time
-            
-            # 通知协调器数据已更新
-            self.async_set_updated_data(self.data)
+                new_data = processed_data
+
+            # Paho callbacks run in a worker thread. Coordinator updates must
+            # be scheduled onto Home Assistant's event loop.
+            def apply_update() -> None:
+                self.last_update_time = receive_time
+                if new_data != self.data:
+                    self.async_set_updated_data(new_data)
+
+            self.hass.loop.call_soon_threadsafe(apply_update)
             
             _LOGGER.info("成功更新MQTT数据，接收时间: %s", receive_time.strftime("%Y-%m-%d %H:%M:%S"))
         except json.JSONDecodeError as json_err:
@@ -216,15 +239,11 @@ class StateGridInfoDataCoordinator(DataUpdateCoordinator):
     async def _async_update_data(self):
         """Fetch data from the appropriate source."""
         try:
-            # 记录当前更新时间
             current_time = datetime.now()
             time_diff = current_time - self.last_update_time
             
             # 记录日志
             _LOGGER.debug("执行数据更新，距离上次更新已过 %s 分钟", time_diff.total_seconds() / 60)
-            
-            # 更新时间戳
-            self.last_update_time = current_time
             
             if self.config.get(CONF_DATA_SOURCE) == DATA_SOURCE_HASSBOX:
                 # 每次都重新从文件读取最新数据
@@ -236,7 +255,6 @@ class StateGridInfoDataCoordinator(DataUpdateCoordinator):
                 # 使用异步执行器运行文件读取操作
                 hassbox_data = await self.hass.async_add_executor_job(self._fetch_hassbox_data)
                 
-                # 更新数据时间戳
                 self.last_update_time = current_time
                 
                 # 清除过期标志
@@ -252,7 +270,7 @@ class StateGridInfoDataCoordinator(DataUpdateCoordinator):
                 else:
                     # 新数据为空时，使用持久化存储中的历史数据
                     if self._storage.data.get("dayList"):
-                        self.data = dict(self._storage.data)
+                        self.data = deepcopy(self._storage.data)
                     else:
                         self.data = hassbox_data
                 
@@ -1328,12 +1346,14 @@ class StateGridInfoDataCoordinator(DataUpdateCoordinator):
             return []
 
 
-class StateGridInfoSensor(SensorEntity):
+class StateGridInfoSensor(
+    CoordinatorEntity[StateGridInfoDataCoordinator], SensorEntity
+):
     """Representation of a State Grid Info sensor."""
 
     def __init__(self, coordinator, config):
         """Initialize the sensor."""
-        self.coordinator = coordinator
+        super().__init__(coordinator)
         self.config = config
         consumer_number = config.get(CONF_CONSUMER_NUMBER, "")
         self.entity_id = f"sensor.state_grid_{consumer_number}"
@@ -1342,6 +1362,7 @@ class StateGridInfoSensor(SensorEntity):
 
         self._attr_name = f"国家电网 {consumer_number}"
         self._attr_native_unit_of_measurement = "元"
+        self._attr_should_poll = False
         self._consumer_number = consumer_number
 
     @property
@@ -1364,16 +1385,7 @@ class StateGridInfoSensor(SensorEntity):
     @property
     def available(self):
         """Return if entity is available."""
-        # 检查数据是否有效
-        if not self.coordinator.data:
-            return False
-            
-        # 检查数据是否过期（超过1小时）
-        time_diff = datetime.now() - self.coordinator.last_update_time
-        if time_diff.total_seconds() > 3600:  # 1小时
-            return False
-            
-        return True
+        return super().available and bool(self.coordinator.data)
         
     @property
     def native_value(self):

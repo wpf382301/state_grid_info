@@ -2,6 +2,7 @@
 import json
 import logging
 import os
+from copy import deepcopy
 from typing import Any
 
 _LOGGER = logging.getLogger(__name__)
@@ -75,12 +76,18 @@ class StateGridStorage:
 
     def _save_sync(self) -> None:
         """Save data to JSON file (sync, must run in executor)."""
+        temp_path = f"{self._file_path}.tmp"
         try:
-            with open(self._file_path, "w", encoding="utf-8") as f:
+            with open(temp_path, "w", encoding="utf-8") as f:
                 json.dump(self._data, f, ensure_ascii=False, indent=2)
+            os.replace(temp_path, self._file_path)
             _LOGGER.debug("已保存持久化数据: %s", self._file_path)
         except IOError as ex:
             _LOGGER.error("保存持久化数据失败: %s", ex)
+            try:
+                os.remove(temp_path)
+            except OSError:
+                pass
 
     def _merge_list_by_key(self, existing: list, new_items: list, key: str) -> list:
         """Merge two lists by a key field.
@@ -89,13 +96,20 @@ class StateGridStorage:
         - Existing items (matched by key) are updated with new values.
         - Items only in existing are kept (never deleted).
         """
-        existing_map = {item[key]: item for item in existing}
+        existing_map = {
+            item[key]: deepcopy(item)
+            for item in existing
+            if isinstance(item, dict) and key in item
+        }
         for item in new_items:
+            if not isinstance(item, dict) or key not in item:
+                _LOGGER.warning("忽略缺少 %s 字段的无效记录: %r", key, item)
+                continue
             k = item[key]
             if k in existing_map:
-                existing_map[k].update(item)
+                existing_map[k].update(deepcopy(item))
             else:
-                existing_map[k] = item
+                existing_map[k] = deepcopy(item)
         return sorted(existing_map.values(), key=lambda x: x[key], reverse=True)
 
     def update(self, new_data: dict[str, Any]) -> dict[str, Any]:
@@ -110,34 +124,40 @@ class StateGridStorage:
         It must be called via hass.async_add_executor_job from async code.
         """
         if not new_data:
-            return self._data
+            return deepcopy(self._data)
+
+        updated = deepcopy(self._data)
 
         # Merge scalar fields - always update
-        self._data["date"] = new_data.get("date", self._data.get("date", ""))
-        self._data["balance"] = new_data.get("balance", self._data.get("balance", 0))
-        self._data["consumer_name"] = new_data.get(
-            "consumer_name", self._data.get("consumer_name", "")
+        updated["date"] = new_data.get("date", updated.get("date", ""))
+        updated["balance"] = new_data.get("balance", updated.get("balance", 0))
+        updated["consumer_name"] = new_data.get(
+            "consumer_name", updated.get("consumer_name", "")
         )
 
         # Merge dayList by "day"
         if "dayList" in new_data:
-            self._data["dayList"] = self._merge_list_by_key(
-                self._data.get("dayList", []), new_data["dayList"], "day"
+            updated["dayList"] = self._merge_list_by_key(
+                updated.get("dayList", []), new_data["dayList"], "day"
             )
 
         # Merge monthList by "month"
         if "monthList" in new_data:
-            self._data["monthList"] = self._merge_list_by_key(
-                self._data.get("monthList", []), new_data["monthList"], "month"
+            updated["monthList"] = self._merge_list_by_key(
+                updated.get("monthList", []), new_data["monthList"], "month"
             )
 
         # Merge yearList by "year"
         if "yearList" in new_data:
-            self._data["yearList"] = self._merge_list_by_key(
-                self._data.get("yearList", []), new_data["yearList"], "year"
+            updated["yearList"] = self._merge_list_by_key(
+                updated.get("yearList", []), new_data["yearList"], "year"
             )
 
-        # Save to file
+        if updated == self._data:
+            _LOGGER.debug("数据无变化，跳过持久化写入")
+            return deepcopy(self._data)
+
+        self._data = updated
         self._save_sync()
 
         _LOGGER.info(
@@ -147,4 +167,4 @@ class StateGridStorage:
             len(self._data.get("yearList", [])),
         )
 
-        return dict(self._data)
+        return deepcopy(self._data)

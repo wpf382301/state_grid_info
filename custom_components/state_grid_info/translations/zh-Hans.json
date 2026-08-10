@@ -5,7 +5,8 @@
         "title": "选择数据来源",
         "description": "请选择国家电网数据的来源方式",
         "data": {
-          "data_source": "数据来源"
+          "data_source": "数据来源",
+          "update_interval_minutes": "刷新间隔（分钟，10–1440）"
         }
       },
       "hassbox_consumer": {
@@ -116,7 +117,8 @@
         "title": "修改数据来源",
         "description": "请选择国家电网数据的来源方式",
         "data": {
-          "data_source": "数据来源"
+          "data_source": "数据来源",
+          "update_interval_minutes": "刷新间隔（分钟，10–1440）"
         }
       },
       "hassbox_consumer": {
